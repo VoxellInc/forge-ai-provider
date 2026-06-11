@@ -18,6 +18,81 @@ test("model shape (no network)", () => {
   assert.equal(m.supportsParallelCalls, true);
 });
 
+test("embedMany maps Forge request and response fields without network", async () => {
+  const calls: Array<{ input: string; init: RequestInit }> = [];
+  const fetchImpl = (async (input, init) => {
+    calls.push({ input: String(input), init: init ?? {} });
+    return new Response(JSON.stringify({ embeddings: [[1, 2], [3, 4]], tokens: 9 }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+  }) satisfies typeof fetch;
+
+  const provider = createForge({
+    apiKey: "secret",
+    baseURL: "https://forge.test///",
+    headers: { "x-static": "yes" },
+    fetch: fetchImpl,
+  });
+
+  const result = await embedMany({
+    model: provider.textEmbeddingModel("pro"),
+    values: ["alpha", "beta"],
+    providerOptions: { forge: { inputType: "query", dimensions: 2 } },
+    headers: { "x-call": "1" },
+  });
+
+  assert.deepEqual(result.embeddings, [
+    [1, 2],
+    [3, 4],
+  ]);
+  assert.deepEqual(result.usage, { tokens: 9 });
+  assert.deepEqual(result.warnings, []);
+  assert.equal(calls.length, 1);
+  const [call] = calls;
+  const requestHeaders = call.init.headers as Record<string, string>;
+  assert.equal(call.input, "https://forge.test/v1/embed");
+  assert.equal(call.init.method, "POST");
+  assert.deepEqual(
+    {
+      "content-type": requestHeaders["content-type"],
+      authorization: requestHeaders.authorization,
+      "x-static": requestHeaders["x-static"],
+      "x-call": requestHeaders["x-call"],
+    },
+    {
+      "content-type": "application/json",
+      authorization: "Bearer secret",
+      "x-static": "yes",
+      "x-call": "1",
+    },
+  );
+  assert.match(String(requestHeaders["user-agent"]), /^ai\//);
+  assert.deepEqual(JSON.parse(String(call.init.body)), {
+    texts: ["alpha", "beta"],
+    model: "pro",
+    input_type: "query",
+    dim: 2,
+  });
+});
+
+test("embed surfaces Forge JSON error messages without network", async () => {
+  const provider = createForge({
+    apiKey: "secret",
+    fetch: async () =>
+      new Response(JSON.stringify({ error: "quota exceeded" }), {
+        status: 429,
+        statusText: "Too Many Requests",
+        headers: { "content-type": "application/json" },
+      }),
+  });
+
+  await assert.rejects(
+    embed({ model: provider("turbo"), value: "hello" }),
+    /Forge embeddings: HTTP 429 quota exceeded/,
+  );
+});
+
 const DIMS: Array<[string, number]> = [
   ["turbo", 1024],
   ["pro", 2560],
